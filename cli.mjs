@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Traceview: inspect what an agent run actually did, step by step.
-// Reads OpenCode (SQLite) and Claude Code (JSONL) transcripts, including every
+// Reads OpenCode (SQLite), Claude Code and Codex (JSONL) transcripts, including every
 // sub-agent a run spawned, and renders a collapsible HTML view or a text outline.
 //
-//   node cli.mjs list [--source all|opencode|claude] [--dir <project>] [--all-dirs] [--children] [--json]
+//   node cli.mjs list [--source all|opencode|claude|codex] [--dir <project>] [--all-dirs] [--children] [--json]
 //   node cli.mjs render <session-id|prefix> [--dir <project>] [--out <file.html>] [--open] [--max-output <chars>] [--no-inline-files]
 //   node cli.mjs outline <session-id|prefix> [--dir <project>] [--json]
 //   node cli.mjs serve [--port 8787] [--dir <project>]
@@ -11,7 +11,7 @@
 //   node cli.mjs untag <session-id> [--dir <project>]
 //   node cli.mjs transcript <session-id> [--dir <project>] [--json]
 //
-// Overrides: --db <opencode.db>  --projects <~/.claude/projects>
+// Overrides: --db <opencode.db>  --projects <~/.claude/projects>  --codex-home <~/.codex>
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -22,6 +22,7 @@ import { DEFAULT_OPENCODE_DB, listOpenCodeSessions, loadOpenCodeRun, openOpenCod
 import { clipRun, DEFAULT_LIMITS, renderIndexPage, renderRunPage } from './render.mjs';
 import { fmtDuration, outlineMarkdown, transcriptMarkdown } from './model.mjs';
 import { attachWorkflowEvidence, bookmarkRun, readBookmarks } from './catalog.mjs';
+import { DEFAULT_CODEX_HOME, discoverCodexSessions, listCodexSessions, loadCodexRun, resolveCodexSession } from './codex.mjs';
 
 const originalEmitWarning = process.emitWarning;
 process.emitWarning = (warning, ...rest) => {
@@ -53,7 +54,7 @@ function gitRoot(dir) {
 export function context(flags) {
   const directory = path.resolve(flags.dir ? String(flags.dir) : gitRoot(process.cwd()));
   const source = String(flags.source || 'all');
-  if (!['all', 'opencode', 'claude'].includes(source)) throw new Error('--source must be all, opencode, or claude');
+  if (!['all', 'opencode', 'claude', 'codex'].includes(source)) throw new Error('--source must be all, opencode, claude, or codex');
   const projectsDir = flags.projects ? path.resolve(String(flags.projects)) : DEFAULT_CLAUDE_PROJECTS;
   const limits = { ...DEFAULT_LIMITS };
   if (flags['max-output']) limits.maxOutput = Number(flags['max-output']);
@@ -64,9 +65,11 @@ export function context(flags) {
     directory, source, projectsDir, limits,
     dbFile: flags.db ? path.resolve(String(flags.db)) : DEFAULT_OPENCODE_DB,
     claudeDir: claudeProjectDir(directory, projectsDir),
+    codexHome: flags['codex-home'] ? path.resolve(String(flags['codex-home'])) : DEFAULT_CODEX_HOME,
     inlineFiles: flags['inline-files'] !== false,
     useOpenCode: source === 'all' || source === 'opencode',
     useClaude: source === 'all' || source === 'claude',
+    useCodex: source === 'all' || source === 'codex',
   };
 }
 
@@ -87,6 +90,10 @@ export async function listAll(ctx, { allDirs = false, children = false } = {}) {
       for (const d of dirs) rows.push(...listClaudeSessions({ projectDir: d }));
     } catch (e) { errors.push(`claude: ${e.message}`); }
   }
+  if (ctx.useCodex) {
+    try { rows.push(...listCodexSessions({ home: ctx.codexHome, directory: allDirs ? '' : ctx.directory, includeChildren: children })); }
+    catch (e) { errors.push(`codex: ${e.message}`); }
+  }
   rows.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
   const bookmarks = readBookmarks(ctx.directory);
   for (const row of rows) row.bookmark = bookmarks.find(b => b.id === row.id && b.source === row.source) || null;
@@ -95,23 +102,30 @@ export async function listAll(ctx, { allDirs = false, children = false } = {}) {
 
 // Find one session by id or prefix across the enabled sources.
 export async function loadRun(ctx, id, sourceHint) {
-  if (sourceHint && !['opencode', 'claude'].includes(sourceHint)) throw new Error('Unknown transcript source');
+  if (sourceHint && !['opencode', 'claude', 'codex'].includes(sourceHint)) throw new Error('Unknown transcript source');
   const opts = { maxImage: ctx.limits.maxImage, inlineFiles: ctx.inlineFiles };
-  const hits = [];
-  if (ctx.useClaude && sourceHint !== 'opencode') {
+  const hits = [], errors = [];
+  if (ctx.useClaude && (!sourceHint || sourceHint === 'claude')) {
     const file = resolveClaudeSession(ctx.claudeDir, id);
     if (file) hits.push({ source: 'claude', id: path.basename(file, '.jsonl') });
   }
-  if (ctx.useOpenCode && sourceHint !== 'claude') {
+  if (ctx.useOpenCode && (!sourceHint || sourceHint === 'opencode')) {
     try { const found = await withDb(ctx, db => resolveOpenCodeSession(db, id)); if (found) hits.push({ source: 'opencode', id: found }); }
-    catch (e) { if (!hits.length) throw e; }
+    catch (e) { if (/^Ambiguous/.test(e.message)) throw e; errors.push(`opencode: ${e.message}`); }
   }
-  if (!hits.length) throw new Error(`No session matching "${id}" for ${ctx.directory} (sources: ${ctx.source}). Run "list" to see ids.`);
+  if (ctx.useCodex && (!sourceHint || sourceHint === 'codex')) {
+    try {
+      const found = resolveCodexSession(discoverCodexSessions(ctx.codexHome), id);
+      if (found) hits.push({ source: 'codex', id: found.id });
+    } catch (e) { if (/^Ambiguous/.test(e.message)) throw e; errors.push(`codex: ${e.message}`); }
+  }
+  if (!hits.length) throw new Error(`No session matching "${id}" for ${ctx.directory} (sources: ${ctx.source}). Run "list" to see ids.${errors.length ? ` ${errors.join('; ')}` : ''}`);
   if (hits.length > 1) throw new Error(`"${id}" matches several sessions: ${hits.map(h => `${h.source}:${h.id}`).join(', ')}. Pass --source.`);
   const [hit] = hits;
   const run = hit.source === 'claude'
     ? loadClaudeRun({ projectDir: ctx.claudeDir, id: hit.id, ...opts })
-    : await withDb(ctx, db => loadOpenCodeRun({ db, id: hit.id, ...opts }));
+    : hit.source === 'codex' ? loadCodexRun({ home: ctx.codexHome, id: hit.id, ...opts })
+      : await withDb(ctx, db => loadOpenCodeRun({ db, id: hit.id, ...opts }));
   return attachWorkflowEvidence(run, ctx.directory, readBookmarks(ctx.directory).find(b => b.id === run.rootId && b.source === run.source));
 }
 

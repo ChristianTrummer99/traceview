@@ -1,7 +1,7 @@
 {
   "name": "traceview",
   "version": "0.1.0",
-  "description": "Local, inspectable agent run viewer for OpenCode and Claude Code",
+  "description": "Local, inspectable agent run viewer for OpenCode, Claude Code and Codex",
   "private": true,
   "license": "UNLICENSED",
   "type": "module",

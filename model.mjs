@@ -1,4 +1,4 @@
-// Normalized transcript model shared by the OpenCode and Claude Code readers.
+// Normalized transcript model shared by the OpenCode, Claude Code and Codex readers.
 // A run is one root session plus every sub-agent session it spawned.
 // Block kinds: text (assistant narration), reasoning, tool, notification
 // (a background agent/task reporting back), system (compaction, errors, meta).
@@ -24,19 +24,22 @@ export function firstLine(text, max = 120) {
 
 // One-line description of a tool call, used for collapsed headers and outlines.
 export function toolSummary(block) {
+  if (typeof block.input === 'string') return firstLine(block.input, 140);
   const input = block.input && typeof block.input === 'object' ? block.input : {};
   const name = String(block.name || '').toLowerCase();
   const pick = (...keys) => { for (const k of keys) if (typeof input[k] === 'string' && input[k].trim()) return input[k]; return ''; };
   const where = input.path && typeof input.path === 'string' ? `  in ${input.path}` : '';
   let text = '';
-  if (name === 'bash') text = pick('description') || pick('command');
+  if (['bash', 'exec_command', 'shell_command', 'shell'].includes(name)) text = pick('description', 'command', 'cmd') || (Array.isArray(input.command) ? input.command.join(' ') : '');
+  else if (name === 'exec') text = pick('code');
   else if (['read', 'edit', 'write', 'multiedit', 'notebookedit'].includes(name)) text = pick('file_path', 'filePath', 'path', 'notebook_path');
   else if (name === 'grep' || name === 'glob') text = `${pick('pattern')}${where}`;
   else if (name === 'agent' || name === 'task') text = `${pick('description')}${input.subagent_type ? ` (${input.subagent_type})` : ''}`;
+  else if (['spawn_agent', 'followup_task'].includes(name)) text = pick('description', 'name', 'task_name', 'prompt', 'message');
   else if (name === 'webfetch') text = pick('url');
   else if (name === 'websearch') text = pick('query');
   else if (name === 'skill') text = pick('skill', 'name');
-  else if (name === 'apply_patch') text = (pick('patchText', 'patch').match(/^\*\*\* (?:Add|Update|Delete) File: .+$/gm) || []).join(' · ');
+  else if (name === 'apply_patch') text = (pick('patchText', 'patch').match(/^\*\*\* (?:Add|Update|Delete) File: .+$/gm) || []).join(' · ') || (Array.isArray(input.changes) ? input.changes.map(c => c.path) : Object.keys(input.changes || {})).join(' · ');
   else if (name === 'todowrite') text = Array.isArray(input.todos) ? `${input.todos.length} todos` : '';
   else if (name === 'workflow') text = pick('scriptPath', 'name', 'title');
   else if (name === 'sendmessage') text = `to ${pick('to')}: ${pick('summary', 'message')}`;
@@ -101,7 +104,7 @@ export function buildOutline(run) {
     t.blocks.forEach((b, i) => {
       const base = { sessionId: s.id, turn: t.index, block: i, at: b.at };
       if (b.kind === 'text') entries.push({ ...base, kind: 'narration', label: firstLine(b.text, 140) });
-      else if (b.kind === 'tool' && (b.childSessionId || /^(agent|task)$/i.test(b.name || ''))) entries.push({ ...base, kind: 'agent', label: b.summary || toolSummary(b), status: b.status, childSessionId: b.childSessionId || null, childTitle: byId.get(b.childSessionId)?.title || '' });
+      else if (b.kind === 'tool' && (b.childSessionId || /^(agent|task|spawn_agent|followup_task)$/i.test(b.name || ''))) entries.push({ ...base, kind: 'agent', label: b.summary || toolSummary(b), status: b.status, childSessionId: b.childSessionId || null, childTitle: byId.get(b.childSessionId)?.title || '' });
       else if (b.kind === 'tool' && b.status === 'error') entries.push({ ...base, kind: 'error', label: `${b.name}: ${b.summary || toolSummary(b)}`, status: 'error' });
       else if (b.kind === 'notification') entries.push({ ...base, kind: 'result', label: firstLine(b.summary || b.text, 140), status: b.status, childSessionId: b.childSessionId || null });
       else if (b.kind === 'system' && (b.level === 'error' || b.level === 'warning' || b.level === 'notice')) entries.push({ ...base, kind: 'system', label: `${b.label || 'system'}: ${firstLine(b.text, 120)}`, status: b.level });

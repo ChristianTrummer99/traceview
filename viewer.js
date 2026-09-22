@@ -43,7 +43,7 @@
     if (location.hash !== href) history.pushState(null, '', href);
     followHash();
   } }, ...children);
-  const isAgentTool = b => b.kind === 'tool' && (b.childSessionId || /^(agent|task)$/i.test(b.name || ''));
+  const isAgentTool = b => b.kind === 'tool' && (b.childSessionId || /^(agent|task|spawn_agent|followup_task)$/i.test(b.name || ''));
 
   // Minimal markdown: fences, tables (as preformatted), headings, lists, paragraphs, inline code/bold/links.
   const inline = s => esc(s)
@@ -156,7 +156,7 @@
       h('div', { class: 'muted small' }, s.cwd ? `cwd ${s.cwd}` : '', s.startedAt ? ` · started ${fmt.date(s.startedAt)}` : '', s.spawnedBy?.sessionId ? ` · spawned by ${byId.get(s.spawnedBy.sessionId)?.title || s.spawnedBy.sessionId}` : ''),
       h('div', { class: 'evidence-actions' }, copyBtn(() => sessionText(s), 'Copy thread for AI'), h('span', { class: 'muted small' }, 'Includes session ID, assignments and visible transcript evidence.')),
     );
-    if (depth > 0 || s.spawnedBy) {
+    if (depth > 0 || s.spawnedBy || s.parentId) {
       const p = s.prompt || s.turns[0]?.prompt?.text || '';
       if (p) head.append(h('details', { class: 'assigned' }, h('summary', {}, 'Assigned task (the prompt this agent was given)'), h('div', { class: 'md prompt', html: md(p) })));
       if (s.result) head.append(h('div', { class: 'small' }, h('span', { class: 'kind' }, 'reported back: '), s.result));
@@ -232,7 +232,8 @@
       h('span', { class: 'tool-name' }, b.name || 'tool'),
       h('span', { class: 'tool-sum', title: b.summary || '' }, b.summary || b.title || ''),
       child ? chip(`sub-agent: ${child.title || child.id}`, 'agent') : b.childMissing ? chip('sub-agent transcript missing', 'err') : null,
-      b.async ? chip('async') : null,
+       b.async ? chip('async') : null,
+       b.meta?.observedExecution ? chip('observed execution') : null,
       h('span', { class: 'muted mono right' }, fmt.time(b.at)),
       b.durationMs != null ? h('span', { class: 'muted' }, fmt.dur(b.durationMs)) : null,
       outLen ? h('span', { class: 'muted' }, fmt.chars(outLen)) : null,
@@ -265,7 +266,8 @@
     const sec = (title, ...kids) => h('div', { class: 'sec' }, h('div', { class: 'sec-title' }, title), ...kids);
     if (!inp) return sec('Input', h('pre', { class: 'code' }, b.input == null ? '(none)' : String(b.input)));
     const raw = () => h('details', { class: 'raw' }, h('summary', {}, 'All input fields'), h('pre', { class: 'code' }, JSON.stringify(inp, null, 2)));
-    if (name === 'bash') return sec('Command', inp.description ? h('div', { class: 'muted small' }, inp.description) : null, inp.workdir ? h('code', {}, `cwd: ${inp.workdir}`) : null, h('pre', { class: 'code' }, inp.command || JSON.stringify(inp, null, 2)), raw());
+    if (['bash', 'exec_command', 'shell_command', 'shell'].includes(name)) return sec('Command', inp.description ? h('div', { class: 'muted small' }, inp.description) : null, inp.workdir ? h('code', {}, `cwd: ${inp.workdir}`) : null, h('pre', { class: 'code' }, typeof inp.command === 'string' ? inp.command : inp.cmd || JSON.stringify(inp.command || inp, null, 2)), raw());
+    if (name === 'exec' && inp.code) return sec('Exec script', h('pre', { class: 'code' }, inp.code), raw());
     if (name === 'apply_patch') return sec('File patch', h('pre', { class: 'code diff' }, inp.patchText || inp.patch || JSON.stringify(inp, null, 2)));
     if (name === 'edit' || name === 'multiedit') {
       const diff = b.meta && typeof b.meta === 'object' && typeof b.meta.diff === 'string' ? b.meta.diff : null;

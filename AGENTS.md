@@ -1,12 +1,12 @@
 # Traceview
 
-Traceview is a local, read-only transcript inspector for OpenCode and Claude Code.
+Traceview is a local, read-only transcript inspector for OpenCode, Claude Code and Codex.
 Keep it runnable with Node 22.13+ and no runtime npm dependencies or build step.
 
 ## Development
 
 - `cli.mjs` owns CLI commands and the loopback HTTP server.
-- `opencode.mjs` and `claude.mjs` normalize source transcripts into `model.mjs`.
+- `opencode.mjs`, `claude.mjs` and `codex.mjs` normalize source transcripts into `model.mjs`.
 - `catalog.mjs` owns local bookmarks and optional version-1 AICNC ledger links.
 - `render.mjs`, `viewer.js`, `index.js` and `viewer.css` provide self-contained HTML.
 - Keep navigation as real links so modified clicks and browser history work.

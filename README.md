@@ -2,7 +2,7 @@
 
 **See what your agents actually did.**
 
-A local, read-only viewer for OpenCode and Claude Code sessions. Follow a run
+A local, read-only viewer for OpenCode, Claude Code and Codex sessions. Follow a run
 through its agent tree, expand individual tool calls, and take precise evidence
 into a conversation alongside the viewer.
 
@@ -63,6 +63,7 @@ sessions you want to inspect:
 ```sh
 node cli.mjs list --dir /path/to/project
 node cli.mjs list --dir /path/to/project --source opencode
+node cli.mjs list --dir /path/to/project --source codex
 node cli.mjs serve --dir /path/to/project --open
 node cli.mjs tag SESSION_ID --dir /path/to/project --label "Feature / attempt one"
 node cli.mjs untag SESSION_ID --dir /path/to/project
@@ -72,8 +73,9 @@ node cli.mjs transcript SESSION_ID --dir /path/to/project
 node cli.mjs transcript SESSION_ID --dir /path/to/project --json
 ```
 
-Unique session ID prefixes are accepted. Add `--source opencode` or
-`--source claude` to select a source explicitly; both are enabled by default.
+Unique session ID prefixes are accepted. Add `--source opencode`,
+`--source claude` or `--source codex` to select a source explicitly; all three are
+enabled by default.
 `list --all-dirs` helps discover sessions across projects. For Claude sessions,
 use the matching `--dir` when opening a session in another project.
 
@@ -95,7 +97,7 @@ work offline and can be regenerated to include newer activity.
 
 Traceview originated in an AI-assisted CNC workflow. Its optional adapter reads
 existing **version-1 AICNC stage ledgers** at `pipeline/runs/*/state.json` inside
-the selected project. Ordinary OpenCode/Claude sessions require no ledger.
+the selected project. Ordinary sessions require no ledger.
 
 A ledger is shown when explicitly bookmarked, referenced by a run/task path in
 prompts or tool inputs, or connected by a recorded native agent ID. Showing a
@@ -125,13 +127,32 @@ Process instructions and validation remain owned by the source project.
 | --- | --- |
 | OpenCode | `$XDG_DATA_HOME/opencode/opencode.db`, or `~/.local/share/opencode/opencode.db` |
 | Claude Code | `~/.claude/projects/<project-slug>/*.jsonl` and session `subagents/` directories |
+| Codex | `$CODEX_HOME/sessions/**/*.jsonl` and `archived_sessions/`, falling back to `~/.codex/` |
 
-Override with `--db /path/opencode.db` or `--projects /path/projects`.
+Override with `--db /path/opencode.db`, `--projects /path/projects`, or
+`--codex-home /path/to/codex-home`.
 
 - OpenCode sessions link through `parent_id` and captured task/resume IDs.
   Schema versions without aggregate model/cost/token columns are supported.
 - Claude's native tool IDs, metadata and result records link agents. Partial
   trailing JSONL records are skipped with a visible note.
+- Codex's original `rollout-*.jsonl` files provide the transcript, including newer
+  `item_completed` events. The SQLite UI/history projections are not required.
+  Root and subdirectory sessions are discovered by their recorded `cwd`;
+  `session_index.jsonl` supplies saved titles when present. Archived transcripts
+  are included. Metadata/summary caches refresh when a rollout changes.
+- Codex agent links use explicit parent-thread IDs and spawn results. Both UUID
+  and run-scoped `/root/...` agent identities are supported. Forks are separate
+  sessions, not inferred subagents. Unlinked/internal agent sessions can be listed
+  with `list --children`; no parent is guessed for missing metadata.
+- Codex UI echoes of messages/tool calls are deduplicated. Commands recorded
+  inside an `exec` wrapper have an **observed execution** badge and remain
+  inspectable separately; tool counts include both wrapper calls and distinct
+  inner executions. The JavaScript wrapper is displayed, never evaluated.
+- Codex encrypted reasoning/inter-agent payloads are marked unavailable; no
+  decryption is attempted. Task prompts unavailable in plaintext cannot be
+  recovered by this viewer. Compacted replacement histories are not replayed as
+  new work. Missing results, orphan outputs and partial records stay explicit.
 - The server binds to `127.0.0.1`, accepts local hosts and GET requests, and opens
   SQLite read-only. No source sessions are edited and no recorded commands run.
 - HTML previews default to 200,000 characters per tool string, 80,000 per text

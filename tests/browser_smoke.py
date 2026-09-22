@@ -15,7 +15,7 @@ from playwright.sync_api import sync_playwright, expect
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--url", default="http://127.0.0.1:8787")
-parser.add_argument("--source", default="opencode", choices=["opencode", "claude"])
+parser.add_argument("--source", default="opencode", choices=["opencode", "claude", "codex"])
 parser.add_argument("--session", required=True)
 parser.add_argument("--screenshots", type=Path)
 parser.add_argument("--snapshot", type=Path, help="Also verify a static HTML export of the selected session")
@@ -104,11 +104,13 @@ with sync_playwright() as p:
     if args.screenshots:
         page.screenshot(path=str(args.screenshots / f"{args.source}-thread-desktop.png"))
 
-    page.get_by_label("Search all threads").fill("bash")
-    expect(page.locator(".search-hit").first).to_be_visible()
-    check_new_tab(page.locator(".search-hit").first)
-    expect(page.get_by_label("Search all threads")).to_have_value("bash")
-    page.locator(".search-hit").first.click()
+    tool_name = page.evaluate("__RUN__.sessions[0].turns.flatMap(t => t.blocks).find(b => b.kind === 'tool').name")
+    tool_hit = page.locator(".search-hit").filter(has=page.locator(".eyebrow", has_text=f"{tool_name} · Turn")).first
+    page.get_by_label("Search all threads").fill(tool_name)
+    expect(tool_hit).to_be_visible()
+    check_new_tab(tool_hit)
+    expect(page.get_by_label("Search all threads")).to_have_value(tool_name)
+    tool_hit.click()
     assert "#b-" in page.url
     expect(page.locator(".blk-tool[open]").first).to_be_visible()
     deep_link = page.url
@@ -160,9 +162,9 @@ with sync_playwright() as p:
         expect(page.locator(".turn[open]")).to_have_count(0)
         expect(page.get_by_text("Offline snapshot.", exact=False)).to_be_visible()
         check_new_tab(page.locator(".tree-item").last)
-        page.get_by_label("Search all threads").fill("bash")
-        expect(page.locator(".search-hit").first).to_be_visible()
-        page.locator(".search-hit").first.click()
+        page.get_by_label("Search all threads").fill(tool_name)
+        expect(tool_hit).to_be_visible()
+        tool_hit.click()
         expect(page.locator(".blk-tool[open]").first).to_be_visible()
     assert not errors, errors
     print(f"Browser checks passed: {payload['threads']} threads, {payload['rootTurns']} turns, {payload['steps']} workflow assignments; desktop + mobile; modifier/middle-click new tabs and history.")
