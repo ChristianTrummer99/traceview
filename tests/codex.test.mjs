@@ -141,7 +141,7 @@ test('Codex image limits, aborted turns and unknown response types remain inspec
 test('Codex CLI/HTTP routes and all-source resolution work without an OpenCode installation', async t => {
   const f = fixture(t);
   f.write('test-session', [f.response(text('user', 'Only Codex is installed'))]);
-  const ctx = context({ dir: f.directory, 'codex-home': f.home, db: path.join(f.home, 'missing.db'), projects: path.join(f.home, 'missing-claude') });
+  const ctx = context({ 'codex-home': f.home, db: path.join(f.home, 'missing.db'), projects: path.join(f.home, 'missing-claude') });
   const { rows } = await listAll(ctx); assert.equal(rows.length, 1); assert.equal(rows[0].source, 'codex');
   const run = await loadRun(ctx, 'test-session'); assert.equal(run.source, 'codex');
   const server = await serve(ctx, 0);

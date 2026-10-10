@@ -10,6 +10,7 @@ uv run tests/browser_smoke.py --url http://127.0.0.1:8787 \
 """
 import argparse
 from pathlib import Path
+from urllib.parse import urlencode
 
 from playwright.sync_api import sync_playwright, expect
 
@@ -17,6 +18,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--url", default="http://127.0.0.1:8787")
 parser.add_argument("--source", default="opencode", choices=["opencode", "claude", "codex"])
 parser.add_argument("--session", required=True)
+parser.add_argument("--project", help="Claude project-store directory name for an all-projects session link")
 parser.add_argument("--screenshots", type=Path)
 parser.add_argument("--snapshot", type=Path, help="Also verify a static HTML export of the selected session")
 args = parser.parse_args()
@@ -66,9 +68,19 @@ with sync_playwright() as p:
         args.screenshots.mkdir(parents=True, exist_ok=True)
         page.screenshot(path=str(args.screenshots / "index-desktop.png"), full_page=True)
 
-    route = f"{args.url}/run/{args.source}/{args.session}"
-    page.goto(route, wait_until="networkidle")
-    payload = page.evaluate("({id: __RUN__.rootId, threads: __RUN__.sessions.length, rootTurns: __RUN__.sessions[0].turns.length, steps: (__RUN__.workflows || []).flatMap(w => w.steps).length})")
+    query = "?" + urlencode({"project": args.project}) if args.project else ""
+    route = f"{args.url}/run/{args.source}/{args.session}{query}"
+    if args.project:
+        expect(page.locator(".index-hero code")).to_have_text("All projects")
+        link = page.locator(f'tbody a[href="/run/{args.source}/{args.session}{query}"]')
+        project_path = link.locator("xpath=ancestor::tr").locator("td:nth-child(2) .mono").nth(1).inner_text()
+        page.get_by_label("Filter by directory").fill(project_path)
+        expect(link).to_be_visible()
+        link.click()
+        page.wait_for_load_state("networkidle")
+    else:
+        page.goto(route, wait_until="networkidle")
+    payload = page.evaluate("({id: __RUN__.rootId, cwd: __RUN__.sessions[0].cwd, threads: __RUN__.sessions.length, rootTurns: __RUN__.sessions[0].turns.length, steps: (__RUN__.workflows || []).flatMap(w => w.steps).length})")
     expect(page.locator(".tree-item")).to_have_count(payload["threads"])
     expect(page.locator(".turn[open]")).to_have_count(0)
     expect(page.locator(".workflow-step[open]")).to_have_count(0)
@@ -148,8 +160,12 @@ with sync_playwright() as p:
     with page.expect_download() as download:
         page.get_by_role("link", name="Full transcript ↓").click()
     assert download.value.suggested_filename.endswith(".md")
-    data = page.request.get(f"{args.url}/data/{args.source}/{args.session}").json()
+    data_link = page.get_by_role("link", name="JSON ↓").get_attribute("href")
+    if query:
+        assert data_link.endswith(query)
+    data = page.request.get(f"{args.url}{data_link}").json()
     assert len(data["sessions"]) == payload["threads"]
+    assert data["sessions"][0]["cwd"] == payload["cwd"]
 
     page.set_viewport_size({"width": 390, "height": 844})
     page.goto(route, wait_until="networkidle")

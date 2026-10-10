@@ -13,20 +13,23 @@ No model calls, runtime npm dependencies, frontend build, or agent plugins.
 Requires **Node.js 22.13+**. Clone this repository, then run from its directory:
 
 ```sh
-npm start -- --dir /path/to/your/project --open
+npm start -- --open
 ```
 
 Open <http://127.0.0.1:8787>. No `npm install` is necessary.
 Use `--port 8788` if the default port is occupied. `Ctrl-C` stops the server.
 
-You can also run the CLI directly from the project you want to inspect:
+You can also run the CLI directly from any directory:
 
 ```sh
 node /path/to/traceview/cli.mjs serve --open
 ```
 
-Without `--dir`, the selected project is the Git root of the current working
-directory, or the current directory when it is not inside a repository.
+Traceview always shows sessions across **all projects**. To narrow the index,
+type a full or partial path in the optional **Directory filter** text box.
+Clear it to show all projects again. Search by title or ID separately.
+Bookmarks and workflow evidence are read from each session's project (its Git
+root when available, otherwise its recorded working directory).
 
 ## Explore a run
 
@@ -57,36 +60,35 @@ Traceview reads and displays evidence; it does not send it to an AI service.
 
 ## CLI
 
-Run these commands from the Traceview checkout. Set `--dir` to the project whose
-sessions you want to inspect:
+Run these commands from the Traceview checkout. Sessions are discovered across
+all projects automatically:
 
 ```sh
-node cli.mjs list --dir /path/to/project
-node cli.mjs list --dir /path/to/project --source opencode
-node cli.mjs list --dir /path/to/project --source codex
-node cli.mjs serve --dir /path/to/project --open
-node cli.mjs tag SESSION_ID --dir /path/to/project --label "Feature / attempt one"
-node cli.mjs untag SESSION_ID --dir /path/to/project
-node cli.mjs render SESSION_ID --dir /path/to/project --open
-node cli.mjs outline SESSION_ID --dir /path/to/project
-node cli.mjs transcript SESSION_ID --dir /path/to/project
-node cli.mjs transcript SESSION_ID --dir /path/to/project --json
+node cli.mjs list
+node cli.mjs list --source opencode
+node cli.mjs list --source codex
+node cli.mjs serve --open
+node cli.mjs tag SESSION_ID --label "Feature / attempt one"
+node cli.mjs untag SESSION_ID
+node cli.mjs render SESSION_ID --open
+node cli.mjs outline SESSION_ID
+node cli.mjs transcript SESSION_ID
+node cli.mjs transcript SESSION_ID --json
 ```
 
 Unique session ID prefixes are accepted. Add `--source opencode`,
 `--source claude` or `--source codex` to select a source explicitly; all three are
 enabled by default.
-`list --all-dirs` helps discover sessions across projects. For Claude sessions,
-use the matching `--dir` when opening a session in another project.
 
 ### Bookmarks and exports
 
-Tags are stored in the selected project's `.session-viewer/runs.json`.
+Tags are stored in the session's project under `.session-viewer/runs.json`.
 Refresh the index and choose **Bookmarked runs** after tagging. Traceview keeps
 this directory name compatible with the original viewer.
 
 Default HTML output is `.session-viewer/<source>-<session-id>.html` in the selected
-project. Override it with `--out /path/to/review.html`.
+session's project (or the current Git root/directory if its working directory
+is unknown). Override it with `--out /path/to/review.html`.
 
 Copy controls use the visible preview; full transcript/JSON exports avoid HTML
 text-preview limits. Exports are normalized evidence rather than byte-for-byte
@@ -97,7 +99,7 @@ work offline and can be regenerated to include newer activity.
 
 Traceview originated in an AI-assisted CNC workflow. Its optional adapter reads
 existing **version-1 AICNC stage ledgers** at `pipeline/runs/*/state.json` inside
-the selected project. Ordinary sessions require no ledger.
+the session's project. Ordinary sessions require no ledger.
 
 A ledger is shown when explicitly bookmarked, referenced by a run/task path in
 prompts or tool inputs, or connected by a recorded native agent ID. Showing a
@@ -112,7 +114,7 @@ there is no title-based guessing or LLM-generated reconstruction.
 To link a ledger manually:
 
 ```sh
-node cli.mjs tag SESSION_ID --dir /path/to/project --label "Part / rebuild" --workflow-run pipeline/runs/part-r1
+node cli.mjs tag SESSION_ID --label "Part / rebuild" --workflow-run pipeline/runs/part-r1
 ```
 
 Include `--workflow-run` again if relabeling a manually linked bookmark.
@@ -134,6 +136,8 @@ Override with `--db /path/opencode.db`, `--projects /path/projects`, or
 
 - OpenCode sessions link through `parent_id` and captured task/resume IDs.
   Schema versions without aggregate model/cost/token columns are supported.
+  Empty reasoning records are labeled unavailable; encrypted provider payloads
+  cannot be displayed as readable reasoning.
 - Claude's native tool IDs, metadata and result records link agents. Partial
   trailing JSONL records are skipped with a visible note.
 - Codex's original `rollout-*.jsonl` files provide the transcript, including newer

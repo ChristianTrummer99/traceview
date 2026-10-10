@@ -206,7 +206,7 @@
       h('div', { class: 'blk-head' }, h('span', { class: 'kind' }, 'assistant'), h('span', { class: 'muted mono' }, fmt.time(b.at)), anchorBtn(id), copyBtn(() => b.text)),
       h('div', { class: 'md', html: md(b.text) }), b.textTruncated ? truncNote(b.textTruncated) : null);
     if (b.kind === 'reasoning') return h('details', { class: 'blk blk-reason', id },
-      h('summary', {}, h('span', { class: 'kind' }, 'recorded reasoning'), h('span', { class: 'muted mono' }, fmt.time(b.at)), h('span', { class: 'preview' }, firstLine(b.text, 160)), anchorBtn(id), copyBtn(() => b.text)),
+      h('summary', {}, h('span', { class: 'kind' }, b.unavailable ? 'reasoning unavailable' : 'recorded reasoning'), h('span', { class: 'muted mono' }, fmt.time(b.at)), h('span', { class: 'preview' }, firstLine(b.text, 160)), anchorBtn(id), copyBtn(() => b.text)),
       h('pre', { class: 'reason' }, b.text), b.textTruncated ? truncNote(b.textTruncated) : null);
     if (b.kind === 'notification') {
       const child = b.childSessionId ? byId.get(b.childSessionId) : null;
@@ -374,7 +374,7 @@
   function renderRunIntro() {
     const tools = run.sessions.reduce((n, s) => n + s.stats.toolCalls, 0);
     const errors = run.sessions.reduce((n, s) => n + s.stats.errors, 0);
-    const href = suffix => `/${suffix}/${run.source}/${encodeURIComponent(run.rootId)}`;
+    const href = suffix => `/${suffix}/${run.source}/${encodeURIComponent(run.rootId)}${location.search}`;
     return h('section', { class: 'run-intro' },
       h('div', { class: 'eyebrow' }, 'RUN RECORD', h('span', { class: `src src-${run.source}` }, run.source)),
       h('h1', {}, run.bookmark?.label || root.title || root.id),

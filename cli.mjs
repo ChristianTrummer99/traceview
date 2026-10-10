@@ -3,13 +3,13 @@
 // Reads OpenCode (SQLite), Claude Code and Codex (JSONL) transcripts, including every
 // sub-agent a run spawned, and renders a collapsible HTML view or a text outline.
 //
-//   node cli.mjs list [--source all|opencode|claude|codex] [--dir <project>] [--all-dirs] [--children] [--json]
-//   node cli.mjs render <session-id|prefix> [--dir <project>] [--out <file.html>] [--open] [--max-output <chars>] [--no-inline-files]
-//   node cli.mjs outline <session-id|prefix> [--dir <project>] [--json]
-//   node cli.mjs serve [--port 8787] [--dir <project>]
-//   node cli.mjs tag <session-id> [--dir <project>] [--label <name>] [--workflow-run pipeline/runs/<run>]
-//   node cli.mjs untag <session-id> [--dir <project>]
-//   node cli.mjs transcript <session-id> [--dir <project>] [--json]
+//   node cli.mjs list [--source all|opencode|claude|codex] [--children] [--json]
+//   node cli.mjs render <session-id|prefix> [--out <file.html>] [--open] [--max-output <chars>] [--no-inline-files]
+//   node cli.mjs outline <session-id|prefix> [--json]
+//   node cli.mjs serve [--port 8787] [--open]
+//   node cli.mjs tag <session-id> [--label <name>] [--workflow-run pipeline/runs/<run>]
+//   node cli.mjs untag <session-id>
+//   node cli.mjs transcript <session-id> [--json]
 //
 // Overrides: --db <opencode.db>  --projects <~/.claude/projects>  --codex-home <~/.codex>
 import fs from 'node:fs';
@@ -17,7 +17,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { spawnSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { claudeProjectDir, DEFAULT_CLAUDE_PROJECTS, listClaudeSessions, loadClaudeRun, resolveClaudeSession } from './claude.mjs';
+import { DEFAULT_CLAUDE_PROJECTS, listClaudeSessions, loadClaudeRun, resolveClaudeSession } from './claude.mjs';
 import { DEFAULT_OPENCODE_DB, listOpenCodeSessions, loadOpenCodeRun, openOpenCodeDatabase, resolveOpenCodeSession } from './opencode.mjs';
 import { clipRun, DEFAULT_LIMITS, renderIndexPage, renderRunPage } from './render.mjs';
 import { fmtDuration, outlineMarkdown, transcriptMarkdown } from './model.mjs';
@@ -33,11 +33,12 @@ process.emitWarning = (warning, ...rest) => {
 
 export function parseArgs(argv) {
   const flags = {}, positional = [];
-  const booleans = new Set(['all-dirs', 'children', 'json', 'open', 'help', 'inline-files']);
+  const booleans = new Set(['children', 'json', 'open', 'help', 'inline-files']);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (!a.startsWith('--')) { positional.push(a); continue; }
     const key = a.slice(2);
+    if (['dir', 'all-dirs'].includes(key.replace(/^no-/, ''))) throw new Error(`${a} has been removed. Traceview shows all projects; use the directory filter in the web UI.`);
     if (key.startsWith('no-')) { flags[key.slice(3)] = false; continue; }
     if (booleans.has(key)) { flags[key] = true; continue; }
     const next = argv[i + 1];
@@ -52,7 +53,6 @@ function gitRoot(dir) {
 }
 
 export function context(flags) {
-  const directory = path.resolve(flags.dir ? String(flags.dir) : gitRoot(process.cwd()));
   const source = String(flags.source || 'all');
   if (!['all', 'opencode', 'claude', 'codex'].includes(source)) throw new Error('--source must be all, opencode, claude, or codex');
   const projectsDir = flags.projects ? path.resolve(String(flags.projects)) : DEFAULT_CLAUDE_PROJECTS;
@@ -62,9 +62,8 @@ export function context(flags) {
   if (flags['max-text']) limits.maxText = Number(flags['max-text']);
   for (const [key, value] of Object.entries(limits)) if (!Number.isFinite(value) || value < 0) throw new Error(`${key} must be a nonnegative finite number`);
   return {
-    directory, source, projectsDir, limits,
+    source, projectsDir, limits,
     dbFile: flags.db ? path.resolve(String(flags.db)) : DEFAULT_OPENCODE_DB,
-    claudeDir: claudeProjectDir(directory, projectsDir),
     codexHome: flags['codex-home'] ? path.resolve(String(flags['codex-home'])) : DEFAULT_CODEX_HOME,
     inlineFiles: flags['inline-files'] !== false,
     useOpenCode: source === 'all' || source === 'opencode',
@@ -78,36 +77,58 @@ async function withDb(ctx, fn) {
   try { return await fn(db); } finally { db.close(); }
 }
 
-export async function listAll(ctx, { allDirs = false, children = false } = {}) {
+function claudeDirectories(ctx) {
+  return fs.readdirSync(ctx.projectsDir, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => path.join(ctx.projectsDir, e.name));
+}
+
+function sessionDirectory(directory) {
+  return typeof directory === 'string' && path.isAbsolute(directory) ? gitRoot(directory) : '';
+}
+
+function runDirectory(run) {
+  return sessionDirectory(run.sessions.find(s => s.id === run.rootId)?.cwd);
+}
+
+export async function listAll(ctx, { children = false } = {}) {
   const rows = [], errors = [];
   if (ctx.useOpenCode) {
-    try { rows.push(...await withDb(ctx, db => listOpenCodeSessions({ db, directory: allDirs ? '' : ctx.directory, includeChildren: children }))); }
+    try { rows.push(...await withDb(ctx, db => listOpenCodeSessions({ db, includeChildren: children }))); }
     catch (e) { errors.push(`opencode: ${e.message}`); }
   }
   if (ctx.useClaude) {
     try {
-      const dirs = allDirs ? fs.readdirSync(ctx.projectsDir).map(n => path.join(ctx.projectsDir, n)).filter(p => fs.statSync(p).isDirectory()) : [ctx.claudeDir];
-      for (const d of dirs) rows.push(...listClaudeSessions({ projectDir: d }));
+      for (const d of claudeDirectories(ctx)) rows.push(...listClaudeSessions({ projectDir: d }));
     } catch (e) { errors.push(`claude: ${e.message}`); }
   }
   if (ctx.useCodex) {
-    try { rows.push(...listCodexSessions({ home: ctx.codexHome, directory: allDirs ? '' : ctx.directory, includeChildren: children })); }
+    try { rows.push(...listCodexSessions({ home: ctx.codexHome, includeChildren: children })); }
     catch (e) { errors.push(`codex: ${e.message}`); }
   }
   rows.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
-  const bookmarks = readBookmarks(ctx.directory);
-  for (const row of rows) row.bookmark = bookmarks.find(b => b.id === row.id && b.source === row.source) || null;
+  const directories = new Map(), bookmarks = new Map();
+  for (const row of rows) {
+    if (!directories.has(row.directory)) directories.set(row.directory, sessionDirectory(row.directory));
+    const directory = directories.get(row.directory);
+    if (!bookmarks.has(directory)) {
+      try { bookmarks.set(directory, directory ? readBookmarks(directory) : []); }
+      catch (e) { errors.push(`bookmarks: ${e.message}`); bookmarks.set(directory, []); }
+    }
+    row.bookmark = bookmarks.get(directory).find(b => b.id === row.id && b.source === row.source) || null;
+  }
   return { rows, errors };
 }
 
 // Find one session by id or prefix across the enabled sources.
-export async function loadRun(ctx, id, sourceHint) {
+export async function loadRun(ctx, id, sourceHint, { claudeProject = null } = {}) {
   if (sourceHint && !['opencode', 'claude', 'codex'].includes(sourceHint)) throw new Error('Unknown transcript source');
   const opts = { maxImage: ctx.limits.maxImage, inlineFiles: ctx.inlineFiles };
   const hits = [], errors = [];
   if (ctx.useClaude && (!sourceHint || sourceHint === 'claude')) {
-    const file = resolveClaudeSession(ctx.claudeDir, id);
-    if (file) hits.push({ source: 'claude', id: path.basename(file, '.jsonl') });
+    try {
+      const dirs = claudeDirectories(ctx).filter(d => claudeProject === null || path.basename(d) === claudeProject);
+      const file = resolveClaudeSession(dirs, id);
+      if (file) hits.push({ source: 'claude', id: path.basename(file, '.jsonl'), projectDir: path.dirname(file) });
+    } catch (e) { if (/^Ambiguous/.test(e.message)) throw e; errors.push(`claude: ${e.message}`); }
   }
   if (ctx.useOpenCode && (!sourceHint || sourceHint === 'opencode')) {
     try { const found = await withDb(ctx, db => resolveOpenCodeSession(db, id)); if (found) hits.push({ source: 'opencode', id: found }); }
@@ -119,14 +140,16 @@ export async function loadRun(ctx, id, sourceHint) {
       if (found) hits.push({ source: 'codex', id: found.id });
     } catch (e) { if (/^Ambiguous/.test(e.message)) throw e; errors.push(`codex: ${e.message}`); }
   }
-  if (!hits.length) throw new Error(`No session matching "${id}" for ${ctx.directory} (sources: ${ctx.source}). Run "list" to see ids.${errors.length ? ` ${errors.join('; ')}` : ''}`);
+  if (!hits.length) throw new Error(`No session matching "${id}" across all projects (sources: ${ctx.source}). Run "list" to see ids.${errors.length ? ` ${errors.join('; ')}` : ''}`);
   if (hits.length > 1) throw new Error(`"${id}" matches several sessions: ${hits.map(h => `${h.source}:${h.id}`).join(', ')}. Pass --source.`);
   const [hit] = hits;
   const run = hit.source === 'claude'
-    ? loadClaudeRun({ projectDir: ctx.claudeDir, id: hit.id, ...opts })
+    ? loadClaudeRun({ projectDir: hit.projectDir, id: hit.id, ...opts })
     : hit.source === 'codex' ? loadCodexRun({ home: ctx.codexHome, id: hit.id, ...opts })
       : await withDb(ctx, db => loadOpenCodeRun({ db, id: hit.id, ...opts }));
-  return attachWorkflowEvidence(run, ctx.directory, readBookmarks(ctx.directory).find(b => b.id === run.rootId && b.source === run.source));
+  const directory = runDirectory(run);
+  if (!directory) return { ...run, bookmark: null, workflows: [], warnings: [] };
+  return attachWorkflowEvidence(run, directory, readBookmarks(directory).find(b => b.id === run.rootId && b.source === run.source));
 }
 
 const pad = (s, n) => String(s ?? '').padEnd(n).slice(0, n);
@@ -139,8 +162,8 @@ function printTable(rows) {
   }
 }
 
-function defaultOut(ctx, run) {
-  const dir = path.join(ctx.directory, '.session-viewer');
+function defaultOut(run) {
+  const dir = path.join(runDirectory(run) || gitRoot(process.cwd()), '.session-viewer');
   fs.mkdirSync(dir, { recursive: true });
   return path.join(dir, `${run.source}-${run.rootId.replace(/[^A-Za-z0-9_.-]/g, '_')}.html`);
 }
@@ -160,10 +183,10 @@ export async function serve(ctx, port) {
       const parts = url.pathname.split('/').filter(Boolean);
       if (!parts.length) {
         const { rows, errors } = await listAll(ctx);
-        return send(200, 'text/html', renderIndexPage(rows, { directory: ctx.directory, errors }));
+        return send(200, 'text/html', renderIndexPage(rows, { errors }));
       }
       if (['run', 'outline', 'transcript', 'data'].includes(parts[0]) && parts.length === 3) {
-        const run = await loadRun(ctx, decodeURIComponent(parts[2]), parts[1]);
+        const run = await loadRun(ctx, decodeURIComponent(parts[2]), parts[1], { claudeProject: url.searchParams.get('project') });
         if (parts[0] === 'outline') return send(200, 'text/plain', outlineMarkdown(run));
         if (parts[0] === 'transcript') return send(200, 'text/plain', transcriptMarkdown(run));
         if (parts[0] === 'data') return send(200, 'application/json', JSON.stringify(run, null, 2));
@@ -184,15 +207,17 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (command === 'list') {
-    const { rows, errors } = await listAll(ctx, { allDirs: !!flags['all-dirs'], children: !!flags.children });
+    const { rows, errors } = await listAll(ctx, { children: !!flags.children });
     for (const e of errors) console.error(`warning: ${e}`);
-    if (flags.json) console.log(JSON.stringify(rows, null, 2)); else { console.log(`Sessions for ${flags['all-dirs'] ? 'all directories' : ctx.directory} (sources: ${ctx.source})`); printTable(rows); }
+    if (flags.json) console.log(JSON.stringify(rows, null, 2)); else { console.log(`Sessions across all projects (sources: ${ctx.source})`); printTable(rows); }
     return;
   }
   if (['tag', 'untag'].includes(command)) {
     if (!positional[0]) throw new Error(`${command} needs a session id or prefix`);
     const run = await loadRun(ctx, positional[0]);
-    bookmarkRun(ctx.directory, run, { label: flags.label, workflowRun: flags['workflow-run'], remove: command === 'untag' });
+    const directory = runDirectory(run);
+    if (!directory) throw new Error('This session has no recorded project directory for storing bookmarks.');
+    bookmarkRun(directory, run, { label: flags.label, workflowRun: flags['workflow-run'], remove: command === 'untag' });
     console.log(`${command === 'tag' ? 'Bookmarked' : 'Removed bookmark for'} ${run.source}:${run.rootId}`);
     return;
   }
@@ -203,7 +228,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (command === 'outline') { console.log(flags.json ? JSON.stringify(run.outline, null, 2) : outlineMarkdown(run)); return; }
     if (command === 'transcript') { console.log(flags.json ? JSON.stringify(run, null, 2) : transcriptMarkdown(run)); return; }
     const html = renderRunPage(clipRun(run, ctx.limits), { limits: ctx.limits });
-    const out = flags.out ? path.resolve(String(flags.out)) : defaultOut(ctx, run);
+    const out = flags.out ? path.resolve(String(flags.out)) : defaultOut(run);
     fs.mkdirSync(path.dirname(out), { recursive: true });
     fs.writeFileSync(out, html);
     const root = run.sessions[0];
@@ -216,7 +241,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('--port must be an integer from 0 to 65535');
     const server = await serve(ctx, port);
     const actualPort = server.address().port;
-    console.log(`Traceview for ${ctx.directory} at http://127.0.0.1:${actualPort}/  (sources: ${ctx.source}; Ctrl-C to stop)`);
+    console.log(`Traceview for all projects at http://127.0.0.1:${actualPort}/  (sources: ${ctx.source}; Ctrl-C to stop)`);
     if (flags.open) openInBrowser(`http://127.0.0.1:${actualPort}/`);
     return;
   }

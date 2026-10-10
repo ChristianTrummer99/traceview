@@ -159,7 +159,7 @@ export function parseClaudeTranscript(file, opts = {}) {
     if (rec.type === 'system') { systemRecord(rec, at); continue; }
     if (rec.type !== 'user' && rec.type !== 'assistant') continue;
     if (at) { s.startedAt ??= at; s.endedAt = at; }
-    if (!s.cwd && rec.cwd) s.cwd = rec.cwd;
+    if (rec.cwd) s.cwd = rec.cwd;
     if (!s.version && rec.version) s.version = rec.version;
     const m = rec.message || {};
     if (rec.type === 'user') userRecord(rec, m, at); else assistantRecord(rec, m, at);
@@ -180,13 +180,12 @@ export function listClaudeSessionFiles(projectDir) {
   return fs.readdirSync(projectDir).filter(n => n.endsWith('.jsonl')).map(n => path.join(projectDir, n));
 }
 
-// Exact id or unique prefix → transcript path (null when nothing matches).
+// Exact id or unique prefix in one or more project directories → transcript path.
 export function resolveClaudeSession(projectDir, id) {
-  const files = listClaudeSessionFiles(projectDir);
-  const exact = files.find(f => path.basename(f, '.jsonl') === id);
-  if (exact) return exact;
-  const hits = files.filter(f => path.basename(f, '.jsonl').startsWith(id));
-  if (hits.length > 1) throw new Error(`Ambiguous Claude session prefix ${id}: ${hits.map(f => path.basename(f, '.jsonl')).join(', ')}`);
+  const files = (Array.isArray(projectDir) ? projectDir : [projectDir]).flatMap(listClaudeSessionFiles);
+  const exact = files.filter(f => path.basename(f, '.jsonl') === id);
+  const hits = exact.length ? exact : files.filter(f => path.basename(f, '.jsonl').startsWith(id));
+  if (hits.length > 1) throw new Error(`Ambiguous Claude session ${id}: ${hits.join(', ')}. Use a full session ID or open the matching session from the web index.`);
   return hits[0] || null;
 }
 
@@ -205,7 +204,7 @@ export function listClaudeSessions({ projectDir }) {
       if (rec.type === 'cost-state') { if (typeof rec.totalCostUSD === 'number') row.cost = rec.totalCostUSD; continue; }
       if (rec.type !== 'user' && rec.type !== 'assistant') continue;
       if (rec.timestamp) { const at = Date.parse(rec.timestamp); row.startedAt ??= at; row.endedAt = at; }
-      if (!row.directory && rec.cwd) row.directory = rec.cwd;
+      if (rec.cwd) row.directory = rec.cwd;
       const c = rec.message?.content;
       if (rec.type === 'assistant') {
         if (rec.message?.model && !row.model) row.model = rec.message.model;

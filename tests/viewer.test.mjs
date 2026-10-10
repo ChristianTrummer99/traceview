@@ -7,9 +7,9 @@ import http from 'node:http';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { openOpenCodeDatabase, listOpenCodeSessions, loadOpenCodeRun, resolveOpenCodeSession } from '../opencode.mjs';
-import { loadClaudeRun } from '../claude.mjs';
+import { claudeProjectDir, loadClaudeRun, resolveClaudeSession } from '../claude.mjs';
 import { attachWorkflowEvidence, bookmarkRun, readBookmarks } from '../catalog.mjs';
-import { context, parseArgs, serve } from '../cli.mjs';
+import { context, listAll, loadRun, parseArgs, serve } from '../cli.mjs';
 import { clipRun, embedJson, renderIndexPage, renderRunPage } from '../render.mjs';
 import { makeSession, makeTurn, buildRun, transcriptMarkdown } from '../model.mjs';
 
@@ -78,6 +78,40 @@ test('OpenCode: legacy schema, project descendants, recursive agents, resumes an
   assert.throws(() => resolveOpenCodeSession(db, 'ses_'), /Ambiguous/);
   assert.equal(resolveOpenCodeSession(db, '%'), null);
   assert.equal(db.all('select count(*) as n from session')[0].n, 5);
+});
+
+test('OpenCode distinguishes readable reasoning from encrypted or empty records', async t => {
+  const fixture = sqliteFixture(t), writer = new DatabaseSync(fixture.file);
+  const metadata = { openai: { reasoningEncryptedContent: 'SYNTHETIC_CIPHERTEXT' } };
+  const parts = [
+    { text: '', metadata },
+    { text: 'Readable provider summary', metadata },
+    { text: ' \n ' },
+    {},
+  ];
+  try {
+    const insert = writer.prepare('insert into part values (?, ?, ?, ?, ?)');
+    parts.forEach((part, i) => insert.run(`reason_${i}`, 'msg_002', 'ses_root', JSON.stringify({ type: 'reasoning', ...part }), 1100 + i));
+  } finally { writer.close(); }
+  const db = await openOpenCodeDatabase(fixture.file); t.after(() => db.close());
+  const run = loadOpenCodeRun({ db, id: 'ses_root' });
+  const blocks = run.sessions[0].turns[0].blocks;
+  const encrypted = blocks.find(b => b.partId === 'reason_0');
+  assert.equal(encrypted.unavailable, 'encrypted');
+  assert.match(encrypted.text, /stored encrypted by the provider/);
+  assert.equal(encrypted.at, 1100);
+  const readable = blocks.find(b => b.partId === 'reason_1');
+  assert.equal(readable.text, 'Readable provider summary');
+  assert.equal(readable.unavailable, undefined);
+  for (const id of ['reason_2', 'reason_3']) {
+    const block = blocks.find(b => b.partId === id);
+    assert.equal(block.unavailable, 'not-recorded');
+    assert.match(block.text, /no readable text was saved/);
+  }
+  assert.equal(run.sessions[0].stats.reasoning, 2);
+  assert.ok(!JSON.stringify(run).includes('SYNTHETIC_CIPHERTEXT'));
+  assert.match(transcriptMarkdown(run), /Reasoning unavailable/);
+  assert.match(renderRunPage(run), /stored encrypted by the provider/);
 });
 
 test('Claude: tool results, async child linking, nested agents and malformed trailing JSONL', t => {
@@ -162,7 +196,7 @@ test('Rendering escapes untrusted transcript HTML, retains code, and discloses c
 
 test('HTTP serves read-only pages and unabridged evidence, rejects foreign hosts and writes', async t => {
   const f = sqliteFixture(t);
-  const ctx = context({ dir: f.directory, source: 'opencode', db: f.file });
+  const ctx = context({ source: 'opencode', db: f.file });
   const server = await serve(ctx, 0); t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
   const base = `http://127.0.0.1:${server.address().port}`;
   const index = await fetch(base); assert.equal(index.status, 200); assert.match(await index.text(), /Customer run/);
@@ -175,9 +209,114 @@ test('HTTP serves read-only pages and unabridged evidence, rejects foreign hosts
   assert.equal((await fetch(`${base}/missing`)).status, 404);
 });
 
+test('All-projects HTTP browses every source, opens Claude projects and keeps bookmarks and ledgers local', async t => {
+  const f = sqliteFixture(t), projects = path.join(f.directory, 'claude'), codexHome = path.join(f.directory, 'codex');
+  const second = path.join(f.directory, 'second project <&>');
+  for (const [id, directory] of [['claude-first', f.directory], ['claude-second', second]]) {
+    json(path.join(claudeProjectDir(directory, projects), `${id}.jsonl`), { type: 'user', cwd: directory, timestamp: '2026-09-23T10:00:00Z', message: { content: `Inspect ${id}` } });
+    const relative = 'pipeline/runs/local';
+    json(path.join(directory, relative, 'state.json'), { version: 1, config: { part_id: id }, issued: { inspect: { prompt: `Only ${id}` } }, results: {} });
+    bookmarkRun(directory, { rootId: id, source: 'claude', sessions: [{ title: id }] }, { label: `Bookmark ${id}`, workflowRun: relative });
+  }
+  json(path.join(codexHome, 'archived_sessions/rollout-other.jsonl'), { type: 'session_meta', payload: { id: 'codex-other', cwd: `${f.directory}-other`, timestamp: '2026-09-23T10:00:00Z', source: 'cli' } });
+  const flags = { db: f.file, projects, 'codex-home': codexHome };
+  const ctx = context(flags);
+  const { rows, errors } = await listAll(ctx);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(new Set(rows.map(r => r.id)), new Set(['ses_root', 'ses_pipeline', 'ses_other', 'claude-first', 'claude-second', 'codex-other']));
+  assert.equal(rows.find(r => r.id === 'claude-second').bookmark.label, 'Bookmark claude-second');
+  assert.equal((await loadRun(ctx, 'claude-sec')).rootId, 'claude-second');
+  assert.equal((await listAll(context({ ...flags, source: 'claude' }))).rows.length, 2);
+
+  const server = await serve(ctx, 0);
+  t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const index = await (await fetch(base)).text();
+  assert.match(index, /All projects/);
+  assert.match(index, /id="directory-filter"/);
+  assert.match(index, /second project &lt;&amp;&gt;/);
+  const links = [...index.matchAll(/href="(\/run\/[^\"]+)"/g)].map(m => m[1]);
+  assert.equal(links.length, 6);
+  for (const link of links) {
+    const response = await fetch(base + link.replace('/run/', '/data/'));
+    assert.equal(response.status, 200, link);
+    const run = await response.json();
+    if (run.source === 'claude') {
+      assert.equal(run.bookmark.label, `Bookmark ${run.rootId}`);
+      assert.equal(run.workflows.length, 1);
+      assert.equal(run.workflows[0].partId, run.rootId);
+    }
+  }
+  const secondLink = links.find(link => link.startsWith('/run/claude/claude-second?'));
+  assert.ok(secondLink);
+  for (const route of ['run', 'outline', 'transcript']) {
+    const response = await fetch(base + secondLink.replace('/run/', `/${route}/`));
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /claude-second/);
+  }
+  assert.equal((await fetch(`${base}/run/claude/claude-second?project=..%2Foutside`)).status, 500);
+});
+
+test('Global Claude resolution handles duplicate IDs, exact matches, unknown cwd and missing source stores', async t => {
+  const directory = temporary(t), projects = path.join(directory, 'claude');
+  const dirs = [path.join(projects, 'one'), path.join(projects, 'two')];
+  for (const [index, dir] of dirs.entries()) {
+    json(path.join(dir, 'shared.jsonl'), { type: 'user', message: { content: `Project ${index}` } });
+    json(path.join(dir, `unique-${index}.jsonl`), { type: 'user', message: { content: `Unique ${index}` } });
+  }
+  json(path.join(dirs[1], 'unique-0-extra.jsonl'), { type: 'user', message: { content: 'Longer ID' } });
+  assert.equal(resolveClaudeSession(dirs, 'unique-0'), path.join(dirs[0], 'unique-0.jsonl'));
+  assert.throws(() => resolveClaudeSession(dirs, 'unique-'), /Ambiguous/);
+  assert.throws(() => resolveClaudeSession(dirs, 'shared'), /Ambiguous/);
+  bookmarkRun(directory, { rootId: 'shared', source: 'claude', sessions: [{ title: 'Unrelated bookmark' }] });
+  const ctx = context({ source: 'claude', projects });
+  const run = await loadRun(ctx, 'shared', 'claude', { claudeProject: 'two' });
+  assert.equal(run.sessions[0].prompt, 'Project 1');
+  assert.equal(run.bookmark, null);
+  assert.deepEqual(run.workflows, []);
+  assert.ok((await listAll(ctx)).rows.every(r => !r.bookmark));
+  const server = await serve(ctx, 0);
+  t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  assert.equal((await fetch(`${base}/data/claude/shared`)).status, 500);
+  for (const [index, project] of ['one', 'two'].entries()) {
+    const data = await (await fetch(`${base}/data/claude/shared?project=${project}`)).json();
+    assert.equal(data.sessions[0].prompt, `Project ${index}`);
+  }
+
+  const f = sqliteFixture(t);
+  const missing = context({ db: f.file, projects: path.join(f.directory, 'absent'), 'codex-home': path.join(f.directory, 'absent') });
+  assert.equal((await loadRun(missing, 'ses_root')).source, 'opencode');
+});
+
+test('Claude sessions moved with /cd list and load under the current directory', async t => {
+  const directory = temporary(t), projects = path.join(directory, 'claude');
+  const oldDir = path.join(directory, 'old-project'), newDir = path.join(directory, 'new-project');
+  const file = path.join(claudeProjectDir(newDir, projects), 'moved.jsonl');
+  const records = [
+    { type: 'user', cwd: oldDir, timestamp: '2026-09-23T10:00:00.000Z', message: { content: 'Started in the old project' } },
+    { type: 'assistant', cwd: oldDir, timestamp: '2026-09-23T10:01:00.000Z', message: { content: [{ type: 'text', text: 'Old project work' }] } },
+    { type: 'user', cwd: newDir, timestamp: '2026-09-23T10:02:00.000Z', message: { content: 'Continued after /cd' } },
+    { type: 'assistant', cwd: newDir, timestamp: '2026-09-23T10:03:00.000Z', message: { content: [{ type: 'text', text: 'New project work' }] } },
+  ];
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, records.map(r => JSON.stringify(r)).join('\n') + '\n');
+  const ctx = context({ source: 'claude', projects });
+  const { rows, errors } = await listAll(ctx);
+  assert.deepEqual(errors, []);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].directory, newDir);
+  const run = await loadRun(ctx, 'moved', 'claude');
+  assert.equal(run.sessions[0].cwd, newDir);
+  assert.equal(run.sessions[0].turns[1].prompt.text, 'Continued after /cd');
+  assert.match(renderIndexPage(rows, {}), new RegExp(`data-directory="${newDir.toLowerCase()}"`));
+});
+
 test('CLI parses boolean flags before arguments and rejects invalid preview limits', () => {
   assert.deepEqual(parseArgs(['render', '--open', 'ses_root']).positional, ['ses_root']);
   assert.equal(parseArgs(['serve', '--no-inline-files']).flags['inline-files'], false);
+  assert.throws(() => parseArgs(['serve', '--dir', '/project']), /has been removed/);
+  assert.throws(() => parseArgs(['serve', '--all-dirs']), /has been removed/);
   assert.throws(() => context({ 'max-output': 'nope' }), /nonnegative finite/);
   assert.throws(() => context({ source: 'guess' }), /--source/);
 });

@@ -64,7 +64,7 @@ export function summarizeSession(s) {
       if (b.status === 'error') stats.errors++;
       if (b.childSessionId) stats.agents++;
       if (b.durationMs) stats.toolMs += b.durationMs;
-    } else if (b.kind === 'reasoning') stats.reasoning++;
+    } else if (b.kind === 'reasoning' && !b.unavailable) stats.reasoning++;
     else if (b.kind === 'text') stats.text++;
     else if (b.kind === 'notification') stats.notifications++;
     else if (b.kind === 'system' && b.level === 'error') stats.errors++;

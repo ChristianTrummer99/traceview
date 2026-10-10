@@ -69,7 +69,15 @@ function partBlock(p, limits) {
   const at = d.time?.start || p.time_created;
   switch (d.type) {
     case 'text': return { kind: 'text', at, text: d.text || '' };
-    case 'reasoning': return { kind: 'reasoning', at, text: d.text || '' };
+    case 'reasoning': {
+      const text = typeof d.text === 'string' ? d.text : '';
+      if (text.trim()) return { kind: 'reasoning', at, text };
+      const encrypted = !!d.metadata?.openai?.reasoningEncryptedContent;
+      return {
+        kind: 'reasoning', at, unavailable: encrypted ? 'encrypted' : 'not-recorded',
+        text: encrypted ? '[Reasoning unavailable — stored encrypted by the provider. No readable text was saved.]' : '[Reasoning unavailable — no readable text was saved in this record.]',
+      };
+    }
     case 'tool': {
       const st = d.state || {};
       const status = st.status === 'completed' ? 'ok' : st.status === 'error' ? 'error' : st.status || 'incomplete';
